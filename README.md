@@ -1,1 +1,1 @@
-Local browser simulation evidence for iq6900 PR5 and PR8, October5 Pacific. Actual page script/template with mock wallet and SDK write results. No signatures, transactions, real payments, or on-chain receipts. Unit/VM tests separately cover actual adapter behavior.
+Controlled browser evidence, October5 Pacific. Actual page/template at PR5 228c45b and PR8 ad4b8a7, both based on master e0166cd. Mock wallet, SDK writes and confirmations; no actual signature, payment or on-chain receipt. Adapter behavior is separately covered by VM tests.
