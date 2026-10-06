@@ -273,6 +273,16 @@
         <div id="ci2_done" class="hide" style="text-align:center;padding:14px 0">
           <div style="font:400 30px 'Zen Dots',monospace;color:var(--hi)">INSCRIBED.</div>
           <p id="ci2_sig" class="muted" style="margin-top:12px"></p>
+          <label for="ci2_tx_id">Transaction ID</label>
+          <input id="ci2_tx_id" type="text" readonly style="width:100%;box-sizing:border-box;margin:8px 0" />
+          <button id="ci2_copy_tx" class="btn" type="button">COPY TRANSACTION ID</button>
+          <label for="ci2_share_link">Inscription link</label>
+          <input id="ci2_share_link" type="url" readonly style="width:100%;box-sizing:border-box;margin:8px 0" />
+          <div style="display:flex;gap:10px;justify-content:center">
+            <button id="ci2_copy_link" class="btn ghost" type="button">COPY LINK</button>
+            <a id="ci2_open_link" class="btn ghost" target="_blank" rel="noopener noreferrer">OPEN INSCRIPTION</a>
+          </div>
+          <p id="ci2_link_status" class="muted" role="status">Keep the transaction ID and link for manual attachment recovery.</p>
           <p id="ci2_donenote" class="muted" style="margin-top:6px;opacity:.55">// the one-time account rent is paid once - your next inscriptions cost far less.</p>
           <p class="muted" style="margin-top:4px;opacity:.55">// your inscription is on chain now; the board can take a few minutes to catch up.</p>
           <div style="display:flex;gap:10px;justify-content:center;margin-top:16px;flex-wrap:wrap">

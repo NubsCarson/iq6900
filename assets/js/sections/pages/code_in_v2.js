@@ -9,7 +9,7 @@
   const CAP_KB = 256; // solana: mainnet-measured on the default free RPC (publicnode): 32-512KB all landed with 0 rpc errors; 256KB ~51s is the wait we accept, above it recommend own RPC / SDK
 
   function CodeInV2() {
-    const templateUrl = "./html/sections/code_in_v2.html?ver=63";
+    const templateUrl = "./html/sections/code_in_v2.html?ver=64";
     let chain = "solana";  // "solana" | "evm" - set by init from the route
     const isEvm = () => chain === "evm";
     let bigAck = false;    // hoodin: user accepted the many-signatures flow
@@ -26,8 +26,49 @@
     let boardLoading = false; // guard so scroll + button don't double-fetch a page
     let boardGen = 0;      // load generation; a fresh load supersedes in-flight ones
 
+    // Opt-in return flow for the two posting apps. Only a public inscription
+    // signature crosses this boundary; wallet and burner material stay here.
+    const params = new URLSearchParams(window.location.search);
+    let attachment = null;
+    try {
+      const origin = params.get("attachmentOrigin");
+      const requestId = params.get("attachmentRequest") || "";
+      const url = new URL(origin);
+      const loopback = ["localhost", "127.0.0.1", "[::1]"];
+      const local = loopback.includes(window.location.hostname) && loopback.includes(url.hostname) && ["http:", "https:"].includes(url.protocol);
+      const originChain = { "https://blockchan.sol.site": "solana", "https://hoodchan.xyz": "evm", "https://blockchan.ar.io": "solana" }[origin];
+      if (window.opener && url.origin === origin && (originChain || local) && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId)) {
+        attachment = { origin, requestId, opener: window.opener,
+          chain: originChain || (params.get("menu") === "hoodin" ? "evm" : "solana"), result: null };
+      }
+    } catch (_) { /* Normal standalone upload, or an invalid return request. */ }
+
+    function returnAttachment() {
+      if (!attachment?.result) return;
+      if (attachment.opener.closed) {
+        $("#ci2_return_status").text("Your post window closed. Your inscription is saved and can be opened from the board.");
+        return;
+      }
+      try {
+        attachment.opener.postMessage({ type: "iq:attachment-complete", requestId: attachment.requestId,
+          ...attachment.result }, attachment.origin);
+        $("#ci2_return_status").text("Returning the attachment to your post…");
+      } catch (_) {
+        $("#ci2_return_status").text("Could not reach your post window. Your inscription is saved; you can retry attaching it.");
+      }
+    }
+    window.addEventListener("message", (event) => {
+      if (!attachment?.result || event.origin !== attachment.origin || event.source !== attachment.opener ||
+          event.data?.requestId !== attachment.requestId || event.data.type !== "iq:attachment-accepted") return;
+      $("#ci2_return_status").text("Attachment added to your post. You can return to the post window.");
+      $("#ci2_return").addClass("hide");
+    });
+
     function init(post, chainName, opts) {
-      chain = chainName === "evm" ? "evm" : "solana";
+      // A posting origin chooses its network once. Route changes in this popup
+      // cannot turn a BlockChan attachment into a paid Hood inscription.
+      if (attachment && (chainName === "evm" ? "evm" : "solana") !== attachment.chain && document.getElementById("ci2")) return;
+      chain = attachment ? attachment.chain : (chainName === "evm" ? "evm" : "solana");
       who = null; burner = null; bigAck = false; // route switch = fresh wallet state
       // Keep the route in the URL so refreshing stays on this board instead of
       // falling back to the home page (stack cards call init() directly).
@@ -76,6 +117,8 @@
       // init() re-renders the template, updates ?menu= and resets timers/wallet state.
       $("#ci2_xchain").text(isEvm() ? "SOLANA? → /CODEIN" : "ROBINHOOD? → /HOODIN")
         .on("click", () => init(null, isEvm() ? null : "evm"));
+      if (attachment) $("#ci2_xchain").prop("disabled", true)
+        .text("ATTACHMENT NETWORK: " + (isEvm() ? "ROBINHOOD" : "SOLANA"));
       $("#ci2_new").on("click", openCompose);
       $("#ci2_tab_feed").on("click", () => switchTab("feed"));
       $("#ci2_tab_mine").on("click", () => switchTab("mine"));
@@ -94,6 +137,7 @@
       $("#ci2_help_close").on("click", () => $("#ci2_help_modal").addClass("hide"));
       $("#ci2_help_go").on("click", openScan);
       $("#ci2_help_copy").on("click", copyScan);
+      $("#ci2_copy_link, #ci2_copy_tx").on("click", copyLink);
       $("#ci2_more").on("click", () => loadBoard(boardCursor));
       $("#ci2_scroll").on("scroll", onBoardScroll);
       $("#ci2_overcap").on("click", () => openCap("choice"));
@@ -137,8 +181,18 @@
       if (isEvm()) applyHoodTheme();
       if (window.iqCodein.hasOwnRpc()) $("#ci2_rpc_link").text("connection: custom RPC");
       refreshCost();
-      loadBoard();
-      startMarkets();
+      if (!attachment) loadBoard();
+      if (attachment) {
+        $("#ci2_again").addClass("hide");
+        $("#ci2_done").append('<p id="ci2_return_status" role="status"></p><button id="ci2_return" class="btn" type="button">ATTACH TO POST AGAIN</button>');
+        $("#ci2_return").on("click", returnAttachment);
+        $("#ci2 .tab[data-kind=\"text\"], #ci2 .tab[data-kind=\"ascii\"]").hide();
+        $("#ci2_file_file, #ci2_image_file").attr("accept", "image/png,image/jpeg,image/gif,image/webp,image/avif,audio/mpeg,audio/wav,audio/ogg,audio/mp4,audio/aac,audio/flac,video/mp4,video/webm,video/ogg");
+        selectKind("file");
+        openCompose();
+        attachment.opener.postMessage({ type: "iq:attachment-ready", requestId: attachment.requestId }, attachment.origin);
+      }
+      if (!attachment) startMarkets();
     }
 
     // Same template, hood skin: swap the theme tokens (CSS class) and the
@@ -184,12 +238,16 @@
         catch (e) { alert(String((e && e.message) || e)); return; }
         // Preflight the wallet-side RPC before any signature is requested; a
         // dead saved RPC for chain 4663 fails every send with -32603.
-        window.iqCodein.checkWalletRpc().then((h) => {
-          if (h.ok) { $("#ci2_rpcwarn").addClass("hide"); return; }
-          $("#ci2_rpcwarn").removeClass("hide").text(
-            "warning: the Robinhood Chain RPC saved in your wallet is " + h.reason +
-            ", so writes will fail before anything is spent. open your wallet network settings for chain 4663 and set the RPC to https://rpc.mainnet.chain.robinhood.com, then reconnect.");
+        const health = window.iqCodein.checkWalletRpc().then((h) => {
+          if (h.ok) $("#ci2_rpcwarn").addClass("hide");
+          else $("#ci2_rpcwarn").removeClass("hide").text(
+              "warning: the Robinhood Chain RPC saved in your wallet is " + h.reason +
+              ", so writes will fail before anything is spent. open your wallet network settings for chain 4663 and set the RPC to https://rpc.mainnet.chain.robinhood.com, then reconnect.");
+          return h;
         });
+        if (attachment && !(await health).ok) {
+          who = null; return;
+        }
       } else {
         provider = await resolveSolanaProvider();
         if (!provider) { alert("No Solana wallet found. Install Phantom or Backpack.\n\nBrave users: open brave://settings/wallet and set Default cryptocurrency wallet to \"Extensions (no fallback)\" so your extension wallet is detected."); return; }
@@ -203,7 +261,7 @@
       // +NEW INSCRIPTION takes the connect button's place once connected.
       $("#ci2_connect").addClass("hide");
       $("#ci2_new").removeClass("hide");
-      loadBoard();
+      if (!attachment) loadBoard();
     }
 
     function switchTab(t) {
@@ -461,12 +519,22 @@
     // Copy the site viewer link (not the explorer link) so a post can be shared
     // as plain text anywhere, not just to X. Brief "COPIED" confirms it landed.
     function copyLink() {
-      if (!currentSig) return;
-      const url = window.iqCodein.viewUrl(currentSig);
-      const $b = $("#ci2_view_copy"), prev = $b.text();
-      const ok = () => { $b.text("COPIED"); setTimeout(() => $b.text(prev), 1200); };
-      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(url).then(ok, () => prompt("copy this link:", url));
-      else prompt("copy this link:", url);
+      const input = this.id === "ci2_copy_tx" ? document.getElementById("ci2_tx_id")
+        : this.id === "ci2_copy_link" ? document.getElementById("ci2_share_link") : null;
+      const value = input ? input.value : (currentSig ? window.iqCodein.viewUrl(currentSig) : "");
+      if (!value) return;
+      const $b = $(this), prev = $b.text();
+      const ok = () => {
+        $b.text("COPIED"); setTimeout(() => $b.text(prev), 1200);
+        if (input) $("#ci2_link_status").text("Copied.");
+      };
+      const fallback = () => {
+        if (!input) { prompt("copy this link:", value); return; }
+        input.focus(); input.select();
+        $("#ci2_link_status").text("Select and copy the highlighted value.");
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(value).then(ok, fallback);
+      else fallback();
     }
     function openScan() { if (currentSig) window.open(window.iqCodein.solscanUrl(currentSig), "_blank"); }
     function copyScan() {
@@ -599,10 +667,25 @@
     }
     function closeModal() { $("#ci2_modal").addClass("hide"); }
 
+    function checkAttachmentNetwork() {
+      if (!attachment || (chain === attachment.chain &&
+          new URLSearchParams(window.location.search).get("menu") === (attachment.chain === "evm" ? "hoodin" : "codein") &&
+          window.iqCodein === window.iqCodeinChains?.[attachment.chain] &&
+          (isEvm() || window.iqCodein.cluster === "mainnet-beta"))) return true;
+      alert("This attachment must be inscribed on the posting app's network. Return to its uploader and try again.");
+      return false;
+    }
+
     async function doInscribe() {
+      if (!checkAttachmentNetwork()) return;
       if (!who) { await connect(); if (!who) return; }
+      if (!checkAttachmentNetwork()) return;
       const pay = currentPayload();
       if (!pay.body) return;
+      if (attachment && !/^data:(image\/(png|jpeg|gif|webp|avif)|audio\/(mpeg|mp3|wav|x-wav|ogg|mp4|aac|flac)|video\/(mp4|webm|ogg))(?:;name=(?:[A-Za-z0-9_.!~*'()-]|%[0-9a-f]{2})*)?;base64,(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/i.test(pay.body)) {
+        alert("Choose a supported image, audio or video file on the posting app's network.");
+        return;
+      }
       const bytes = new TextEncoder().encode(JSON.stringify({ kind: pay.kind, body: pay.body, who })).length;
       if (overCapNow(bytes)) { openCap("choice"); return; }
 
@@ -611,22 +694,28 @@
       $("#ci2_retry").addClass("hide"); $("#ci2_log").text("");
       setBar(0, "starting");
 
+      const inscriptionChain = chain;
+      const inscriptionAdapter = window.iqCodein;
       try {
         let res;
         if (isEvm()) {
           // One overall bar: funding 0-10, upload 10-80, finalization 80-100.
           // The adapter reports real stages; batch count is not signature count.
-          res = await window.iqCodein.inscribe({
+          res = await inscriptionAdapter.inscribe({
             kind: pay.kind, body: pay.body, who,
             onStatus: setBar,
           });
         } else {
           await ensureBurner();
+          if (!checkAttachmentNetwork()) {
+            $("#ci2_compose").removeClass("hide"); $("#ci2_progress").addClass("hide");
+            return;
+          }
           const wallet = { publicKey: provider.publicKey, signTransaction: (tx) => provider.signTransaction(tx) };
-          const connection = window.iqCodein.connect();
-          const manual = window.iqCodein.getSpeed();
-          const speed = manual !== "auto" ? manual : window.iqCodein.recommendSpeed(window.iqCodein.hasOwnRpc());
-          res = await window.iqCodein.inscribe({
+          const connection = inscriptionAdapter.connect();
+          const manual = inscriptionAdapter.getSpeed();
+          const speed = manual !== "auto" ? manual : inscriptionAdapter.recommendSpeed(inscriptionAdapter.hasOwnRpc());
+          res = await inscriptionAdapter.inscribe({
             connection, wallet, burner, kind: pay.kind, body: pay.body, speed,
             onProgress: (pct) => setBar(pct, "writing " + pct + "%"),
             onRetry: (n) => setBar(0, "network congestion - retrying (" + (n + 1) + "/2)"),
@@ -641,12 +730,18 @@
         $("#ci2_launch_after").toggleClass("hide", !canLaunch);
         $("#ci2_view").toggleClass("ghost", canLaunch); // LAUNCH is the primary when present
         if (isEvm()) $("#ci2_donenote").text("// the storage fee charges once, at the final step. every tx before it is gas only.");
-        // Fire-and-forget: warming the durable index can take ~15s on robinhood
-        // (uncached cold-walk), and the done screen is already up, so do not
-        // block the board refresh on it. The launcher's inventory read benefits
-        // from the warm even though the board reloads immediately.
-        Promise.resolve(window.iqCodein.notify(res.sig, { kind: pay.kind, body: pay.body, who })).catch(() => {});
-        loadBoard();
+        const shareLink = inscriptionAdapter.viewUrl(res.sig);
+        $("#ci2_share_link").val(shareLink);
+        $("#ci2_tx_id").val(res.sig);
+        $("#ci2_open_link").attr("href", shareLink);
+        $("#ci2_link_status").text(attachment ? "Returning your inscription to the post…" : "Keep this link to your inscription.");
+        Promise.resolve(inscriptionAdapter.notify(res.sig, { kind: pay.kind, body: pay.body, who })).catch(() => {});
+        if (!attachment) loadBoard();
+        if (attachment) {
+          attachment.result = { network: inscriptionChain === "evm" ? "robinhood" : "solana", signature: res.sig };
+          $("#ci2_return").removeClass("hide");
+          returnAttachment();
+        }
       } catch (e) {
         // Never show "failed". solana: refund the burner to the wallet and say
         // so; when even the refund can't land, the funds sit in the burner and
@@ -664,7 +759,7 @@
             : "nothing but tiny gas was spent (the storage fee only charges at the final tx). retry resumes from where it stopped - chunks already on chain are never re-signed. ";
         } else {
           try {
-            const back = burner ? await window.iqCodein.sweep(window.iqCodein.connect(), burner, provider.publicKey) : 0;
+            const back = burner ? await inscriptionAdapter.sweep(inscriptionAdapter.connect(), burner, provider.publicKey) : 0;
             if (back > 0) note = "your ~" + (back / 1e9).toFixed(4) + " SOL went back to your wallet - retry will re-fund it. ";
           } catch (_) { /* refund could not land; funds stay in the burner */ }
           if (!note) note = "your SOL is safe in your session account and is reused when you retry - nothing is lost. ";
