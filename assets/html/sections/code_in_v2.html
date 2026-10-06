@@ -82,6 +82,14 @@
    .hide, so name the div explicitly to actually hide it (e.g. dev buy on hood) */
 #ci2 .meter div.hide{display:none}
 #ci2 .rpcbox a{color:var(--fg)}
+#ci2 #ci2_wallet_dialog{width:min(400px,calc(100vw - 32px));padding:0;color:var(--fg);background:var(--panel2);border:1px solid var(--fg40);max-height:calc(100dvh - 48px);overflow:auto}
+#ci2 #ci2_wallet_dialog::backdrop{background:rgba(4,6,4,.75)}
+#ci2 #ci2_wallet_dialog .bar{display:flex;align-items:center;justify-content:space-between}
+#ci2 #ci2_wallet_dialog .body{padding:20px}
+#ci2 #ci2_wallet_dialog p{font-size:13px;line-height:1.6;margin:0 0 16px}
+#ci2 #ci2_wallet_options{display:grid;gap:10px}
+#ci2 #ci2_wallet_options .btn{width:100%;min-height:48px;text-align:left;padding:12px 16px}
+#ci2 #ci2_wallet_options .btn:focus-visible{outline:2px solid var(--fg);outline-offset:3px}
 #ci2 .muted{opacity:.55;font-size:10px}
 /* top padding clears the fixed site nav so the modal title bar is never cut */
 #ci2 .modal{position:fixed;inset:0;z-index:60;background:rgba(4,6,4,.72);backdrop-filter:blur(4px);display:flex;align-items:flex-start;justify-content:center;padding:96px 16px 30px;overflow:auto}
@@ -127,7 +135,8 @@
    its line whether or not it wraps. */
 @media (max-width:600px){
   #ci2_hdr{flex-wrap:wrap;gap:6px;padding:10px 12px;letter-spacing:.06em}
-  #ci2_hdr #ci2_bigfile,#ci2_hdr #ci2_who,#ci2_hdr #ci2_xchain{display:none}
+  #ci2_hdr #ci2_bigfile,#ci2_hdr #ci2_who{display:none}
+  #ci2_hdr #ci2_xchain{order:3;flex-basis:100%;margin-left:0;min-height:40px;text-align:center}
   #ci2_hdr #ci2_connect,#ci2_hdr #ci2_new{margin-left:auto}
 }
 /* ---- board + markets desk (design: Hood In Flow.dc.html) ---- */
@@ -170,6 +179,7 @@
     <button id="ci2_xchain">ROBINHOOD? &rarr; /HOODIN</button>
     <span id="ci2_bigfile" style="margin-left:14px;opacity:.75;text-decoration:underline;cursor:pointer">how to upload BIG FILE</span>
     <span id="ci2_who" class="hide" style="margin-left:auto;opacity:.7"></span>
+    <button id="ci2_change_wallet" class="btn ghost hide" type="button">CHANGE WALLET</button>
     <button id="ci2_connect" class="btn" style="margin-left:auto">CONNECT WALLET</button>
     <button id="ci2_new" class="btn hide" style="margin-left:8px">+ NEW INSCRIPTION</button>
   </div>
@@ -217,6 +227,10 @@
   </div>
 
   <!-- inscribe modal -->
+  <dialog id="ci2_wallet_dialog" class="panel" aria-labelledby="ci2_wallet_title">
+    <div class="bar"><span id="ci2_wallet_title">connect_wallet.exe</span><button id="ci2_wallet_close" class="btn ghost" type="button" aria-label="Close wallet picker">×</button></div>
+    <div class="body"><p>Choose your wallet for Robinhood Chain.</p><div id="ci2_wallet_options"></div><button id="ci2_wallet_disconnect" class="btn ghost hide" type="button" style="margin-top:20px;width:100%">DISCONNECT WALLET</button><p id="ci2_wallet_empty" class="hide">No EVM wallet detected. Open this page in your wallet browser or enable your wallet extension.</p></div>
+  </dialog>
   <div id="ci2_modal" class="modal hide">
     <div class="panel" style="width:640px;max-width:100%">
       <div class="bar"><span id="ci2_win" style="opacity:.8">code_in.exe</span>
@@ -307,6 +321,7 @@
       <div class="body">
         <p id="ci2_view_file_notice" class="file-notice hide">files here are inscribed by anyone on the internet. be careful with what you download.</p>
         <div id="ci2_view_body"></div>
+        <div id="ci2_view_coins" class="hide" aria-live="polite"></div>
         <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-top:14px;font:500 10px 'Kode Mono',monospace">
           <span id="ci2_view_meta" style="opacity:.55"></span>
           <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end">
@@ -501,6 +516,7 @@ await writer.writeRow(conn, signer,
           <div class="upl_row" style="margin-top:10px;align-items:flex-start">
             <div id="ci2_tk_prev"></div>
             <div style="flex:1;min-width:0">
+              <div id="ci2_tk_coins" class="hide" aria-live="polite"></div>
               <span id="ci2_tk_src" class="muted" style="display:block"></span>
               <span id="ci2_tk_repick" class="muted" style="text-decoration:underline;cursor:pointer">pick a different inscription</span>
             </div>
@@ -553,11 +569,11 @@ await writer.writeRow(conn, signer,
         <div id="ci2_tk_done" class="hide" style="text-align:center;padding:14px 0">
           <div style="font:400 30px 'Zen Dots',monospace;color:var(--hi)">LAUNCHED.</div>
           <p id="ci2_tk_mint" class="muted" style="margin-top:12px;word-break:break-all"></p>
-          <p id="ci2_tk_regnote" class="muted" style="margin-top:6px;opacity:.55">// writing the launch to the board...</p>
+          <p id="ci2_tk_regnote" class="muted" style="margin-top:6px;opacity:.55">Token created. IQ board registration is a separate step.</p>
           <div style="display:flex;gap:10px;justify-content:center;margin-top:16px;flex-wrap:wrap">
             <a id="ci2_tk_pump" class="btn" target="_blank" rel="noopener" style="text-decoration:none">VIEW ON PUMP.FUN</a>
             <button id="ci2_tk_chart" class="btn ghost">OPEN CHART</button>
-            <button id="ci2_tk_reg_retry" class="btn ghost hide">WRITE TO BOARD AGAIN</button>
+            <button id="ci2_tk_reg_retry" class="btn ghost hide">REGISTER ON IQ BOARD</button>
           </div>
         </div>
       </div>

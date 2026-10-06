@@ -65,3 +65,24 @@ PR #31). Their rollout must be coordinated. Deployed-origin/COOP/CSP checks,
 fresh wallet signing and physical
 mobile QA remain unverified for the reconciled build. No mainnet deployment or
 new paid transaction is claimed by these regressions.
+
+## Prepared PR #5 / #8 integration
+
+The local paired candidate applies PR #8 `ad4b8a7` onto PR #5 `228c45b` and
+resolves their shared page changes. It retains attachment origin/network/media
+guards, transaction/link recovery and return retry together with wallet selection,
+pending-session invalidation and confirmed inscription Retry. The page cache is
+version 98 and its combined template is version 65; the EVM adapter matches PR #8.
+Zo's hybrid progress/finalization observer, file/audio picker and notices, and
+latest board-caption removal are retained from master `e0166cd`.
+
+`npm --prefix tests test` passes 99 controlled regressions: both individual suites
+with their 19 shared master cases counted once, plus two integration cases. One
+changes the wallet and route while a Hood attachment write is pending, then
+checks the original author, canonical transaction and network through both return
+retry and inscription Retry even if notification throws. No new SDK write or
+connection occurs for either confirmed retry. Opening a fresh standalone
+composition still allows a new write with identical content.
+The other refuses a changed network before funding, then verifies that editing
+the reopened composition submits the newly selected file instead of the old
+pending payload.

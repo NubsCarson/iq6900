@@ -30,40 +30,29 @@ let activeRpc = DEFAULT_RPC;
 try { const saved = localStorage.getItem(RPC_KEY); if (saved) activeRpc = saved; } catch (e) {}
 sdk.setNetwork("robinhood", activeRpc);
 
-let provider = null; // BrowserProvider over the injected wallet
 let signer = null;
 let burnerWallet = null; // deterministic Model B burner, derived once per session from a wallet signature
 let inscribeCheckpoint = null; // { row, at: HybridCheckpoint } - survives across RETRY for the same row
+let walletGeneration = 0;
+const WALLET_CHANGED = "Wallet account or network changed. Reconnect your selected wallet before inscribing.";
 const BURNER_MSG = "IQ6900 hood-in inscription burner v1"; // fixed message = deterministic burner derivation
+let injected = null;
+let disconnected = false;
+const wallets = new Map();
+const WALLET_KEY = "iq6900_evm_wallet";
+window.addEventListener("eip6963:announceProvider", ({ detail }) => {
+  if (!detail?.info?.rdns || !detail.info.name || typeof detail.provider?.request !== "function") return;
+  if ([...wallets.values()].some(w => w.provider === detail.provider)) return;
+  wallets.set(detail.info.rdns, { id: detail.info.rdns, name: detail.info.name, provider: detail.provider });
+  window.dispatchEvent(new Event("iq:evm-wallets"));
+});
+window.dispatchEvent(new Event("eip6963:requestProvider"));
+function availableWallets() {
+  if (wallets.size) return [...wallets.values()];
+  return (window.ethereum?.providers || (window.ethereum ? [window.ethereum] : []))
+    .map((eth, i) => ({ id: "injected-" + i, name: eth.isPhantom ? "Phantom" : eth.isMetaMask ? "MetaMask" : "Browser wallet", provider: eth }));
+}
 
-// EIP-6963 multi-wallet discovery. Brave injects its own window.ethereum and
-// claims the generic slot, hiding Phantom/MetaMask so a raw window.ethereum read
-// connects to the wrong wallet (or fails on Robinhood). Collect every wallet
-// that announces itself, then pick the best match at connect time.
-const eip6963 = {};
-if (typeof window !== "undefined") {
-  window.addEventListener("eip6963:announceProvider", (e) => {
-    const d = e && e.detail;
-    if (d && d.info && d.info.rdns && d.provider) eip6963[d.info.rdns] = d;
-  });
-  window.dispatchEvent(new Event("eip6963:requestProvider"));
-}
-function getEth() {
-  const by = (rdns) => eip6963[rdns] && eip6963[rdns].provider;
-  const announced = Object.values(eip6963);
-  // Phantom first (hood users use it for Robinhood), then MetaMask, then any
-  // announced wallet that is not Brave's built-in, then anything announced,
-  // then the raw slot as a last resort.
-  return by("app.phantom") || by("io.metamask")
-    || (announced.find((d) => d.info.rdns !== "com.brave.wallet") || {}).provider
-    || (announced[0] || {}).provider
-    || (typeof window !== "undefined" ? window.ethereum : null) || null;
-}
-async function discoverEth() {
-  if (typeof window !== "undefined") window.dispatchEvent(new Event("eip6963:requestProvider"));
-  if (!Object.keys(eip6963).length) await new Promise((r) => setTimeout(r, 250));
-  return getEth();
-}
 
 async function gwFetch(path, init) {
   for (const gw of GATEWAYS) {
@@ -102,12 +91,24 @@ const fees = { basic: 0.00012, linked: 0.00036, loaded: false };
 // sessions and its funded balance/leftover is reused), hash the signature into
 // a 32-byte private key, and wire it to the PUBLIC rpc so its txs never touch
 // the wallet. Message signing shows a clean "sign message" prompt, no warning.
-async function getBurner() {
+async function getBurner(session) {
   if (burnerWallet) return burnerWallet;
-  if (!signer) throw new Error("connect the wallet first");
-  const sig = await signer.signMessage(BURNER_MSG);
+  const sig = await session.signer.signMessage(BURNER_MSG);
+  if (session.generation !== walletGeneration) throw new Error(WALLET_CHANGED);
   burnerWallet = new Wallet(keccak256(toUtf8Bytes(sig)), new JsonRpcProvider(activeRpc));
   return burnerWallet;
+}
+
+async function writeSession(who) {
+  if (!signer) throw new Error("connect the wallet first");
+  const session = { signer, generation: walletGeneration };
+  const eth = injected;
+  const accounts = await eth.request({ method: "eth_accounts" });
+  const chain = await eth.request({ method: "eth_chainId" });
+  if (session.generation !== walletGeneration || chain.toLowerCase() !== CHAIN_ID ||
+      accounts[0]?.toLowerCase() !== session.signer.address.toLowerCase() || who?.toLowerCase() !== session.signer.address.toLowerCase())
+    throw new Error(WALLET_CHANGED);
+  return session;
 }
 
 // Top the burner up to cover the board fee (it pays that) + gas for the chunk
@@ -115,7 +116,7 @@ async function getBurner() {
 // buffer stays tiny and any excess is swept back. The USER pays the inventory
 // fee on their own userInventoryCodeIn tx, so it is not funded here. A funded
 // deterministic burner is reused, so later inscriptions usually skip this.
-async function fundBurner(burner, rowLen, onStatus) {
+async function fundBurner(burner, rowLen, session, onStatus) {
   const boardFeeEth = rowLen <= 700 ? fees.basic : fees.linked;
   // Generous flat gas buffer per tx: robinhood gas is sub-cent so this is tiny
   // in ETH, and any excess is swept back - over-funding is cheap, running the
@@ -128,13 +129,14 @@ async function fundBurner(burner, rowLen, onStatus) {
   const topUp = need - have;
   // Pre-flight the wallet balance so a drained wallet gets a clear message
   // instead of a cryptic RPC "insufficient funds" mid-retry.
-  const walletBal = await signer.provider.getBalance(await signer.getAddress());
+  const walletBal = await session.signer.provider.getBalance(session.signer.address);
+  if (session.generation !== walletGeneration) throw new Error(WALLET_CHANGED);
   if (walletBal <= topUp) {
     throw new Error("not enough ETH in your wallet to start the write (need ~"
       + Number(formatEther(topUp)).toFixed(5) + " ETH, most of it comes back). add ETH and retry.");
   }
   onStatus?.(3, "funding - approve the transfer in your wallet");
-  const tx = await signer.sendTransaction({ to: burner.address, value: topUp });
+  const tx = await session.signer.sendTransaction({ to: burner.address, value: topUp });
   onStatus?.(6, "funding - waiting for confirmation");
   await tx.wait();
 }
@@ -164,23 +166,53 @@ const surface = {
 
   // The wallet is the signer AND the broadcaster; connect = request accounts,
   // make sure the wallet is on Robinhood Chain (add it if unknown), grab a signer.
-  connectWallet: async () => {
-    const eth = await discoverEth();
-    if (!eth) throw new Error("no EVM wallet found. install Phantom or MetaMask.");
-    await eth.request({ method: "eth_requestAccounts" });
-    try {
-      await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: CHAIN_ID }] });
-    } catch (err) {
-      if (err && (err.code === 4902 || /unrecognized|not added/i.test(String(err.message)))) {
-        await eth.request({ method: "wallet_addEthereumChain", params: [{
-          chainId: CHAIN_ID, chainName: "Robinhood Chain",
-          rpcUrls: [DEFAULT_RPC], nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },
-          blockExplorerUrls: ["https://robinhoodchain.blockscout.com"],
-        }] });
-      } else throw err;
+  getWallets: () => availableWallets().map(({ id, name, provider }) => ({ id, name, selected: provider === injected })),
+  getWalletProvider: () => injected,
+  disconnectWallet: () => {
+    walletGeneration++;
+    signer = null; injected = null; burnerWallet = null; inscribeCheckpoint = null; disconnected = true;
+    try { localStorage.setItem(WALLET_KEY, "disconnected"); } catch (_) {}
+  },
+  connectWallet: async ({ onlyIfTrusted = false, walletId } = {}) => {
+    const options = availableWallets();
+    let saved; try { saved = localStorage.getItem(WALLET_KEY); } catch (_) {}
+    if (onlyIfTrusted && (disconnected || saved === "disconnected")) return null;
+    const choice = options.find(w => w.id === (walletId || saved)) || (!walletId && !saved && options.length === 1 ? options[0] : null);
+    if (!choice) { if (onlyIfTrusted) return null; throw new Error("Choose an EVM wallet first."); }
+    const eth = choice.provider;
+    const generation = ++walletGeneration;
+    signer = null; burnerWallet = null; inscribeCheckpoint = null; injected = eth;
+    if (!eth) throw new Error("no EVM wallet found. install MetaMask.");
+    if (onlyIfTrusted) {
+      const accounts = await eth.request({ method: "eth_accounts" });
+      if (generation !== walletGeneration) throw new Error(WALLET_CHANGED);
+      if (!accounts.length || (await eth.request({ method: "eth_chainId" })).toLowerCase() !== CHAIN_ID) return null;
+    } else {
+      await eth.request({ method: "eth_requestAccounts" });
+      if (generation !== walletGeneration) throw new Error(WALLET_CHANGED);
+      try {
+        await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: CHAIN_ID }] });
+      } catch (err) {
+        if (err && (err.code === 4902 || /unrecognized|not added/i.test(String(err.message)))) {
+          await eth.request({ method: "wallet_addEthereumChain", params: [{
+            chainId: CHAIN_ID, chainName: "Robinhood Chain",
+            rpcUrls: [DEFAULT_RPC], nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },
+            blockExplorerUrls: ["https://robinhoodchain.blockscout.com"],
+          }] });
+        } else throw err;
+      }
     }
-    provider = new BrowserProvider(eth);
-    signer = await provider.getSigner();
+    if (generation !== walletGeneration) throw new Error(WALLET_CHANGED);
+    if ((await eth.request({ method: "eth_chainId" })).toLowerCase() !== CHAIN_ID) throw new Error("Switch the selected wallet to Robinhood Chain before connecting.");
+    const connectedProvider = new BrowserProvider(eth);
+    const connectedSigner = await connectedProvider.getSigner();
+    const accounts = await eth.request({ method: "eth_accounts" });
+    const chain = await eth.request({ method: "eth_chainId" });
+    if (generation !== walletGeneration || chain.toLowerCase() !== CHAIN_ID || accounts[0]?.toLowerCase() !== connectedSigner.address.toLowerCase())
+      throw new Error(WALLET_CHANGED);
+    signer = connectedSigner;
+    disconnected = false;
+    try { localStorage.setItem(WALLET_KEY, choice.id); } catch (_) {}
     burnerWallet = null; // a (re)connect may be a different wallet; re-derive the burner lazily
     return signer.address;
   },
@@ -191,7 +223,8 @@ const surface = {
   // chainlist entry (rpc.arrowrpc.com was down 2026-09) fails every send with
   // -32603, so catch it BEFORE the user signs anything.
   checkWalletRpc: async () => {
-    const eth = getEth();
+    const eth = injected;
+    const generation = walletGeneration;
     if (!eth) return { ok: false, reason: "no wallet" };
     const timed = (p, ms) => Promise.race([p, new Promise((_, rj) => setTimeout(() => rj(new Error("timeout")), ms))]);
     let walletBlock;
@@ -202,7 +235,7 @@ const surface = {
       const chainBlock = await timed(new JsonRpcProvider(DEFAULT_RPC).getBlockNumber(), 6000);
       if (chainBlock - walletBlock > 600) return { ok: false, reason: (chainBlock - walletBlock) + " blocks behind" };
     } catch (err) { /* official rpc hiccup; do not blame the wallet */ }
-    return { ok: true };
+    return generation === walletGeneration ? { ok: true } : { ok: false, reason: "wallet changed" };
   },
 
   setRpc: (rpc) => {
@@ -238,20 +271,21 @@ const surface = {
   // (skipping already-landed chunks/fees) instead of redoing everything. Returns
   // the board row's tx (boardTx) as sig, which is what the feed/UI keys on.
   inscribe: async ({ kind, body, who, onProgress, onStatus }) => {
-    if (!signer) throw new Error("connect the wallet first");
     const row = JSON.stringify({ kind, body, who });
+    const session = await writeSession(who);
     onStatus?.(0, "preparing session - approve the wallet message if prompted");
-    const burner = await getBurner();
+    const burner = await getBurner(session);
     const resume = inscribeCheckpoint && inscribeCheckpoint.row === row ? inscribeCheckpoint.at : undefined;
     onStatus?.(2, "checking session funds");
-    await fundBurner(burner, row.length, onStatus);
+    await fundBurner(burner, row.length, session, onStatus);
+    if (session.generation !== walletGeneration) throw new Error(WALLET_CHANGED);
     const batches = surface.estimateCost(new TextEncoder().encode(row).length).chunks;
     onStatus?.(resume?.onChainPath !== undefined ? 80 : 10,
       resume?.onChainPath !== undefined ? "upload already complete - finalizing" : "uploading - burner sends the batches");
     // Observe only this write's wallet sends, without changing the shared signer
     // or SDK. A resumed inventory write may only need the second signature.
     let finalStep = resume?.inventoryTx ? 1 : 0;
-    const finalizeSigner = new Proxy(signer, {
+    const finalizeSigner = new Proxy(session.signer, {
       get(target, key) {
         if (key === "sendTransaction") return async (...args) => {
           const step = ++finalStep;
@@ -276,11 +310,11 @@ const surface = {
         } },
       );
       onStatus?.(100, "complete - all transactions confirmed");
-      inscribeCheckpoint = null;
-      sweepBurner(burner, signer.address); // fire-and-forget return of leftover
+      if (session.generation === walletGeneration) inscribeCheckpoint = null;
+      sweepBurner(burner, session.signer.address); // fire-and-forget return of leftover
       return { sig: out.boardTx };
     } catch (e) {
-      if (e && e.checkpoint) inscribeCheckpoint = { row, at: e.checkpoint };
+      if (session.generation === walletGeneration && e?.checkpoint) inscribeCheckpoint = { row, at: e.checkpoint };
       throw e;
     }
   },
@@ -292,9 +326,9 @@ const surface = {
   // "risky" warning - so no burner and no inventory finalize, just the plain
   // writeRow (dbCodeIn + tail). who inside the row carries the launcher.
   inscribeBoard: async ({ kind, body, who, onProgress }) => {
-    if (!signer) throw new Error("connect the wallet first");
+    const session = await writeSession(who);
     const row = JSON.stringify({ kind, body, who });
-    const hash = await sdk.writer.writeRow(signer, DB_ROOT_ID, TABLE, row, (pct) => onProgress && onProgress(pct));
+    const hash = await sdk.writer.writeRow(session.signer, DB_ROOT_ID, TABLE, row, (pct) => onProgress && onProgress(pct));
     return { sig: hash };
   },
 

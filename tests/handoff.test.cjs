@@ -29,11 +29,17 @@ async function mount(t, opts = {}) {
   t.after(() => dom.window.close());
   const w = dom.window;
   w.$ = w.jQuery = jquery(w); w.TextEncoder = TextEncoder;
-  const sent = [], alerts = [], writes = [], connects = [], notifications = [], boards = [];
+  const sent = [], alerts = [], writes = [], connects = [], notifications = [], notificationRows = [], boards = [];
+  const listeners = new Map();
+  const walletProvider = { on: (event, handler) => listeners.set(event, handler),
+    removeListener: (event, handler) => { if (listeners.get(event) === handler) listeners.delete(event); } };
+  w.HTMLDialogElement.prototype.close = function(value) { this.returnValue = value; this.open = false; this.dispatchEvent(new w.Event('close')); };
+  w.HTMLDialogElement.prototype.showModal = function() { this.open = true; this.close('fixture-evm'); };
   w.alert = message => alerts.push(message); w.console.error = () => {};
   w.opener = opts.noOpener ? null : { closed: false,
     postMessage: (data, target) => sent.push({ data: JSON.parse(JSON.stringify(data)), target }) };
-  w.phantom = { solana: { publicKey: { toString: () => 'local-user' }, connect: async () => {
+  w.phantom = { solana: { ...walletProvider, publicKey: { toString: () => 'local-user' }, connect: async (options = {}) => {
+    if (options.onlyIfTrusted) return null;
     connects.push('solana'); if (opts.walletPending) await opts.walletPending.promise;
     return { publicKey: 'local-user' };
   } } };
@@ -48,14 +54,20 @@ async function mount(t, opts = {}) {
     readBoard: async () => { boards.push(chain); return { rows: [] }; },
     getSpeed: () => 'auto', recommendSpeed: () => 'light', connect: () => ({}),
     deriveBurner: async () => { if (opts.burnerPending) await opts.burnerPending.promise; return {}; }, sweep: async () => 0,
-    connectWallet: async () => { connects.push('evm'); if (opts.walletPending) await opts.walletPending.promise; return '0x' + 'b'.repeat(40); },
+    getWallets: () => [{ id: 'fixture-evm', name: 'Fixture wallet', selected: true }],
+    getWalletProvider: () => walletProvider, disconnectWallet: () => {},
+    connectWallet: async (options = {}) => {
+      if (options.onlyIfTrusted) return null;
+      assert.equal(options.walletId, 'fixture-evm');
+      connects.push('evm'); if (opts.walletPending) await opts.walletPending.promise; return '0x' + 'b'.repeat(40);
+    },
     checkWalletRpc: async () => opts.healthPending ? opts.healthPending.promise : { ok: true },
     inscribe: async args => {
       if (chain === 'evm' && opts.statusStages) for (const [percent, label] of opts.statusStages) args.onStatus(percent, label);
       writes.push({ chain, args }); if (opts.writePending) await opts.writePending.promise;
       if (opts.fail) throw new Error('fixture upload rejected'); return { sig: signatures[chain] };
     },
-    notify: async sig => { notifications.push({ chain, sig }); if (opts.notifyPending) return opts.notifyPending.promise; return false; },
+    notify: async (sig, row) => { notifications.push({ chain, sig }); notificationRows.push(row); if (opts.notifyPending) return opts.notifyPending.promise; return false; },
   };
   w.iqCodeinChains = adapters; w.iqCodein = adapters.solana;
   w.$.ajax = ({ success }) => success(fs.readFileSync(path.join(assets, 'html/sections/code_in_v2.html'), 'utf8'));
@@ -68,7 +80,7 @@ async function mount(t, opts = {}) {
     w.$(input).trigger('change'); await pause(20);
   }
   async function upload() { w.$('#ci2_go').trigger('click'); await pause(20); }
-  return { w, sent, alerts, writes, connects, notifications, boards, adapters, pickFile, upload };
+  return { w, sent, alerts, writes, connects, notifications, notificationRows, listeners, boards, adapters, pickFile, upload };
 }
 
 for (const [origin, chain] of [
@@ -233,4 +245,39 @@ test('rejected clipboard access selects the saved transaction ID', async t => {
   assert.equal(f.w.document.activeElement.id, 'ci2_tx_id');
   assert.equal(f.w.document.activeElement.value, signatures.solana);
   assert.match(f.w.$('#ci2_link_status').text(), /Select and copy/);
+});
+
+test('a Hood attachment confirmed after wallet invalidation keeps its author and both Retry results', async t => {
+  const writePending = deferred();
+  const f = await mount(t, { origin: 'https://hoodchan.xyz', initialChain: 'evm', writePending });
+  await f.pickFile(); await f.upload(); assert.equal(f.writes.length, 1);
+  const author = f.writes[0].args.who;
+  f.listeners.get('accountsChanged')();
+  f.w.history.replaceState({}, '', '?menu=codein');
+  f.adapters.evm.notify = (_, row) => { f.notificationRows.push(row); throw new Error('synchronous notification failure'); };
+  writePending.resolve(); await pause(20);
+  assert.equal(f.w.$('#ci2_done').hasClass('hide'), false);
+  assert.equal(f.w.$('#ci2_retry').hasClass('hide'), true);
+  assert.equal(f.sent[1].data.network, 'robinhood');
+  assert.equal(f.sent[1].data.signature, signatures.evm);
+  assert.equal(f.w.$('#ci2_tx_id').val(), signatures.evm);
+  assert.equal(f.notificationRows[0].who, author);
+  f.w.$('#ci2_return').trigger('click');
+  assert.deepEqual(f.sent[2], f.sent[1]);
+  f.w.$('#ci2_retry').trigger('click'); await pause(20);
+  assert.deepEqual(f.sent[3], f.sent[1]); assert.equal(f.writes.length, 1);
+  assert.equal(f.notificationRows[1].who, author);
+  assert.deepEqual(f.connects, ['evm']);
+});
+
+test('network refusal before funding discards the old payload when the composition is edited', async t => {
+  const burnerPending = deferred(); const f = await mount(t, { burnerPending });
+  await f.pickFile('image/png', 'original.png'); await f.upload();
+  f.w.history.replaceState({}, '', '?menu=hoodin'); burnerPending.resolve(); await pause(20);
+  assert.equal(f.w.$('#ci2_compose').hasClass('hide'), false); assert.equal(f.writes.length, 0);
+  f.w.history.replaceState({}, '', '?menu=codein');
+  await f.pickFile('image/png', 'replacement.png'); await f.upload();
+  assert.equal(f.writes.length, 1);
+  assert.match(f.writes[0].args.body, /;name=replacement\.png;base64,/);
+  assert.equal(f.sent[1].data.signature, signatures.solana);
 });
